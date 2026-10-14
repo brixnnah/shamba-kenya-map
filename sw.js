@@ -1,6 +1,6 @@
-const CACHE_NAME = 'shamba-shell-v1';
+const CACHE_NAME = 'shamba-shell-v5';
 const RUNTIME_CACHE = 'shamba-runtime-v1';
-const TILE_CACHE = 'shamba-map-tiles-v1';
+const TILE_CACHE = 'shamba-map-tiles-v2';
 const APP_SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest'];
 const CORE_EXTERNAL_ASSETS = [
   'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
@@ -41,7 +41,7 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url);
   if (request.method !== 'GET') return;
 
-  if (url.hostname === 'tile.openstreetmap.org') {
+  if (url.hostname === 'tile.openstreetmap.org' || url.hostname === 'server.arcgisonline.com') {
     event.respondWith(
       caches.open(TILE_CACHE).then(async (cache) => {
         const cached = await cache.match(request);

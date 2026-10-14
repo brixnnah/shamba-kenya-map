@@ -1,4 +1,6 @@
 const STORAGE_KEY = 'shamba.parcels.v1';
+const DOCUMENT_DATABASE = 'shamba.documents.v1';
+const MAX_DOCUMENT_SIZE = 25 * 1024 * 1024;
 const DEFAULT_CENTER = [-1.286389, 36.817223];
 const DEFAULT_ZOOM = 6;
 const MAP_STYLE = {
@@ -15,8 +17,13 @@ const elements = {
   connection: document.getElementById('connectionStatus'),
   connectionText: document.getElementById('connectionText'),
   locationName: document.getElementById('locationName'),
+  roadAttribution: document.getElementById('roadAttribution'),
+  satelliteAttribution: document.getElementById('satelliteAttribution'),
   mapHeading: document.getElementById('mapHeading'),
   mapSubheading: document.getElementById('mapSubheading'),
+  locationSearchForm: document.getElementById('locationSearchForm'),
+  locationSearchInput: document.getElementById('locationSearchInput'),
+  locationSearchResults: document.getElementById('locationSearchResults'),
   mappingPanel: document.getElementById('mappingPanel'),
   pointCount: document.getElementById('pointCount'),
   accuracy: document.getElementById('accuracy'),
@@ -33,6 +40,13 @@ const elements = {
 
 let parcels = loadParcels();
 let map;
+let streetLayer;
+let satelliteLayer;
+let satelliteLabelsLayer;
+let satelliteView = false;
+let searchMarker;
+let searchInProgress = false;
+let lastLocationSearchAt = 0;
 let draftPoints = [];
 let draftLayer;
 let savedLayers = new Map();
@@ -42,6 +56,8 @@ let recording = false;
 let manualMode = false;
 let toastTimer;
 let activeParcelId = null;
+let pendingDeedPhoto = '';
+let savingParcel = false;
 
 function loadParcels() {
   try {
@@ -70,16 +86,198 @@ function persistParcels() {
   return true;
 }
 
+function createRecordId() {
+  return crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function openDocumentDatabase() {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('Document storage is not supported in this browser.'));
+      return;
+    }
+    const request = indexedDB.open(DOCUMENT_DATABASE, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains('documents')) {
+        request.result.createObjectStore('documents');
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Could not open document storage.'));
+    request.onblocked = () => reject(new Error('Document storage is blocked by another tab. Close other tabs and try again.'));
+  });
+}
+
+async function storeDocumentFile(id, file) {
+  const database = await openDocumentDatabase();
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('documents', 'readwrite');
+      transaction.objectStore('documents').put(file, id);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error('Could not save the document.'));
+      transaction.onabort = () => reject(transaction.error || new Error('Document save was cancelled.'));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function getDocumentFile(id) {
+  const database = await openDocumentDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const transaction = database.transaction('documents', 'readonly');
+      const request = transaction.objectStore('documents').get(id);
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => reject(request.error || new Error('Could not read the saved document.'));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+async function deleteDocumentFile(id) {
+  const database = await openDocumentDatabase();
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = database.transaction('documents', 'readwrite');
+      transaction.objectStore('documents').delete(id);
+      transaction.oncomplete = resolve;
+      transaction.onerror = () => reject(transaction.error || new Error('Could not remove the saved document.'));
+      transaction.onabort = () => reject(transaction.error || new Error('Document removal was cancelled.'));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function validateDocuments(files) {
+  const supportedExtension = /\.(pdf|docx?|xlsx?|odt|ods|txt|rtf)$/i;
+  for (const file of files) {
+    if (!file.type.startsWith('image/') && !supportedExtension.test(file.name)) {
+      throw new Error('Choose a PDF, Word, Excel, text, or image file.');
+    }
+    if (file.size > MAX_DOCUMENT_SIZE) {
+      throw new Error('Each document must be 25 MB or smaller.');
+    }
+  }
+}
+
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 KB';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function showSelectedDocuments(files) {
+  const list = document.getElementById('newDocumentList');
+  list.replaceChildren();
+  for (const file of files) {
+    const item = document.createElement('li');
+    item.textContent = `${file.name} · ${formatFileSize(file.size)}`;
+    list.append(item);
+  }
+  list.classList.toggle('hidden', files.length === 0);
+}
+
+async function saveDocumentFiles(files, createdIds) {
+  const records = [];
+  for (const file of files) {
+    const record = {
+      id: createRecordId(),
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size
+    };
+    await storeDocumentFile(record.id, file);
+    createdIds.push(record.id);
+    records.push(record);
+  }
+  return records;
+}
+
+async function cleanupDocumentFiles(ids) {
+  for (const id of ids) {
+    try {
+      await deleteDocumentFile(id);
+    } catch (error) {
+      console.error('Could not clean up an unsaved document.', error);
+      showToast('Some temporary document data could not be removed. Check device storage.');
+    }
+  }
+}
+
+function renderDocumentList(parcel) {
+  const list = document.getElementById('detailsDocuments');
+  list.replaceChildren();
+  const documents = Array.isArray(parcel.documents) ? parcel.documents : [];
+  if (documents.length === 0) {
+    const empty = document.createElement('li');
+    empty.className = 'attachment-empty';
+    empty.textContent = 'No documents attached';
+    list.append(empty);
+    return;
+  }
+
+  documents.forEach((record) => {
+    const item = document.createElement('li');
+    item.className = 'attachment-item';
+    const copy = document.createElement('div');
+    const name = document.createElement('strong');
+    name.textContent = record.name;
+    const size = document.createElement('span');
+    size.textContent = formatFileSize(record.size);
+    copy.append(name, size);
+    const download = document.createElement('button');
+    download.type = 'button';
+    download.className = 'secondary-button attachment-download';
+    download.textContent = 'Download';
+    download.setAttribute('aria-label', `Download ${record.name}`);
+    download.addEventListener('click', () => downloadDocument(record));
+    item.append(copy, download);
+    list.append(item);
+  });
+}
+
+async function downloadDocument(record) {
+  try {
+    const file = await getDocumentFile(record.id);
+    if (!file) throw new Error('This file is missing from this device. It may have been removed from browser storage.');
+    const url = URL.createObjectURL(file);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = record.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (error) {
+    console.error('Could not download the attached document.', error);
+    showToast(error.message || 'Could not open the attached document.');
+  }
+}
+
 function initialiseMap() {
   if (!window.L) {
     showToast('Map library could not load. Connect to the internet and refresh.');
     return;
   }
   map = L.map('map', { zoomControl: false, preferCanvas: true }).setView(DEFAULT_CENTER, DEFAULT_ZOOM);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  streetLayer = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors'
   }).addTo(map);
+  satelliteLayer = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19 }
+  );
+  satelliteLabelsLayer = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 19 }
+  );
   draftLayer = L.featureGroup().addTo(map);
   map.on('click', onMapClick);
   renderParcels();
@@ -122,6 +320,14 @@ function parcelArea(parcel) {
   return formatArea(parcel.points);
 }
 
+function formatVisit(value, compact = false) {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return 'Not recorded yet';
+  return new Intl.DateTimeFormat(undefined, compact
+    ? { dateStyle: 'medium' }
+    : { dateStyle: 'medium', timeStyle: 'short' }).format(date);
+}
+
 function renderParcels() {
   elements.list.replaceChildren();
   elements.count.textContent = String(parcels.length);
@@ -155,6 +361,12 @@ function renderParcels() {
     const detail = document.createElement('span');
     detail.textContent = [parcel.county || 'Kenya', parcelArea(parcel)].join(' · ');
     copy.append(name, detail);
+    if (parcel.lastVisitedAt) {
+      const visit = document.createElement('span');
+      visit.className = 'parcel-visit-summary';
+      visit.textContent = `Last visited ${formatVisit(parcel.lastVisitedAt, true)}`;
+      copy.append(visit);
+    }
     const arrow = document.createElement('span');
     arrow.className = 'parcel-chevron';
     arrow.setAttribute('aria-hidden', 'true');
@@ -186,11 +398,134 @@ function updateConnection() {
   elements.connectionText.textContent = online ? 'Online' : 'Offline · saved on device';
 }
 
+function toggleMapLayer() {
+  if (!map) return;
+  satelliteView = !satelliteView;
+  if (satelliteView) {
+    map.removeLayer(streetLayer);
+    satelliteLayer.addTo(map);
+    satelliteLabelsLayer.addTo(map);
+  } else {
+    map.removeLayer(satelliteLabelsLayer);
+    map.removeLayer(satelliteLayer);
+    streetLayer.addTo(map);
+  }
+  document.getElementById('toggleMapLayer').textContent = satelliteView ? 'Map' : 'Satellite';
+  document.getElementById('toggleMapLayer').setAttribute('aria-label',
+    satelliteView ? 'Switch to road map' : 'Switch to satellite view');
+  document.getElementById('toggleMapLayer').setAttribute('aria-pressed', String(satelliteView));
+  elements.roadAttribution.classList.toggle('hidden', satelliteView);
+  elements.satelliteAttribution.classList.toggle('hidden', !satelliteView);
+}
+
 function showToast(message) {
   elements.gpsToast.textContent = message;
   elements.gpsToast.classList.remove('hidden');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => elements.gpsToast.classList.add('hidden'), 4200);
+}
+
+function showSearchResults(results) {
+  const container = elements.locationSearchResults;
+  container.replaceChildren();
+  results.forEach((result) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.role = 'option';
+    button.className = 'search-result';
+    button.textContent = result.display_name;
+    button.addEventListener('click', () => selectSearchResult(result));
+    container.append(button);
+  });
+  container.classList.remove('hidden');
+  elements.locationSearchInput.setAttribute('aria-expanded', 'true');
+}
+
+function showSearchMessage(message) {
+  const container = elements.locationSearchResults;
+  container.replaceChildren();
+  const item = document.createElement('div');
+  item.className = 'search-result search-result-message';
+  item.textContent = message;
+  container.append(item);
+  container.classList.remove('hidden');
+  elements.locationSearchInput.setAttribute('aria-expanded', 'true');
+}
+
+function hideSearchResults() {
+  elements.locationSearchResults.replaceChildren();
+  elements.locationSearchResults.classList.add('hidden');
+  elements.locationSearchInput.setAttribute('aria-expanded', 'false');
+}
+
+function selectSearchResult(result) {
+  const latitude = Number(result.lat);
+  const longitude = Number(result.lon);
+  if (!Number.isFinite(latitude) || latitude < -90 || latitude > 90 ||
+      !Number.isFinite(longitude) || longitude < -180 || longitude > 180) {
+    showToast('That search result did not include valid coordinates.');
+    return;
+  }
+  const point = [latitude, longitude];
+  map.setView(point, Math.max(map.getZoom(), 16));
+  if (searchMarker) map.removeLayer(searchMarker);
+  const icon = L.divIcon({
+    className: '',
+    html: '<div class="search-place-marker"></div>',
+    iconSize: [22, 22],
+    iconAnchor: [11, 20]
+  });
+  searchMarker = L.marker(point, { icon }).addTo(map);
+  const popup = document.createElement('span');
+  popup.textContent = result.display_name;
+  searchMarker.bindPopup(popup);
+  elements.locationSearchInput.value = result.display_name;
+  hideSearchResults();
+}
+
+async function searchLocation(event) {
+  event.preventDefault();
+  if (searchInProgress) return;
+  const query = elements.locationSearchInput.value.trim();
+  if (query.length < 2) {
+    showSearchMessage('Enter at least two characters to search.');
+    return;
+  }
+
+  searchInProgress = true;
+  const button = elements.locationSearchForm.querySelector('[type="submit"]');
+  button.disabled = true;
+  showSearchMessage('Searching places…');
+  try {
+    const wait = Math.max(0, 1000 - (Date.now() - lastLocationSearchAt));
+    if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
+    lastLocationSearchAt = Date.now();
+    const url = new URL('https://nominatim.openstreetmap.org/search');
+    url.searchParams.set('format', 'jsonv2');
+    url.searchParams.set('limit', '5');
+    url.searchParams.set('q', query);
+    const response = await fetch(url, {
+      headers: { 'Accept-Language': navigator.language || 'en' }
+    });
+    if (!response.ok) {
+      throw new Error(`Location search failed (HTTP ${response.status}). Try again later.`);
+    }
+    const results = await response.json();
+    if (!Array.isArray(results) || results.length === 0) {
+      showSearchMessage('No matching places found. Try a town, landmark, or address.');
+      return;
+    }
+    showSearchResults(results);
+  } catch (error) {
+    console.error('Location search failed.', error);
+    const message = error instanceof TypeError
+      ? 'Location search needs an internet connection.'
+      : error.message;
+    showSearchMessage(message);
+  } finally {
+    searchInProgress = false;
+    button.disabled = false;
+  }
 }
 
 function updateDraft() {
@@ -314,39 +649,158 @@ function endMapping() {
 function showParcelForm() {
   if (draftPoints.length < 3) return;
   stopRecording();
+  pendingDeedPhoto = '';
+  document.getElementById('deedPhotoInput').value = '';
+  document.getElementById('parcelDocumentInput').value = '';
+  showSelectedDocuments([]);
+  document.getElementById('newDeedPhotoPreview').classList.add('hidden');
   elements.parcelDialog.showModal();
   elements.parcelForm.elements.name.focus();
 }
 
-function saveParcel(event) {
+async function compressDeedPhoto(file) {
+  if (!file.type.startsWith('image/') || file.size > 20 * 1024 * 1024) {
+    throw new Error('Choose an image smaller than 20 MB.');
+  }
+
+  let image;
+  let releaseImage = () => {};
+  if (window.createImageBitmap) {
+    image = await createImageBitmap(file);
+    releaseImage = () => image.close();
+  } else {
+    const objectUrl = URL.createObjectURL(file);
+    image = new Image();
+    releaseImage = () => URL.revokeObjectURL(objectUrl);
+    try {
+      await new Promise((resolve, reject) => {
+        image.onload = resolve;
+        image.onerror = () => reject(new Error('The selected image could not be opened.'));
+        image.src = objectUrl;
+      });
+    } catch (error) {
+      releaseImage();
+      throw error;
+    }
+  }
+
+  try {
+    const scale = Math.min(1, 1400 / Math.max(image.width, image.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Could not prepare the selected image.');
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.76);
+  } finally {
+    releaseImage();
+  }
+}
+
+async function chooseNewDeedPhoto(event) {
+  const input = event.currentTarget;
+  const file = input.files[0];
+  if (!file) return;
+  try {
+    pendingDeedPhoto = await compressDeedPhoto(file);
+    document.getElementById('newDeedPhotoImage').src = pendingDeedPhoto;
+    document.getElementById('newDeedPhotoPreview').classList.remove('hidden');
+    showToast('Deed photo added. It will be saved on this device.');
+  } catch (error) {
+    console.error('Could not prepare the title deed photo.', error);
+    showToast(error.message || 'Could not read that photo. Choose a JPG or PNG image.');
+  } finally {
+    input.value = '';
+  }
+}
+
+async function updateDeedPhoto(event) {
+  const input = event.currentTarget;
+  const file = input.files[0];
+  const parcelId = activeParcelId;
+  if (!file || !parcelId) return;
+  try {
+    const photo = await compressDeedPhoto(file);
+    const parcel = parcels.find((item) => item.id === parcelId);
+    if (!parcel) return;
+    const previousPhoto = parcel.deedPhoto;
+    parcel.deedPhoto = photo;
+    if (!persistParcels()) {
+      if (previousPhoto === undefined) delete parcel.deedPhoto;
+      else parcel.deedPhoto = previousPhoto;
+      return;
+    }
+    openParcelDetails(parcelId);
+    showToast('Title deed photo saved on this device.');
+  } catch (error) {
+    console.error('Could not save the title deed photo.', error);
+    showToast(error.message || 'Could not read that photo. Choose a JPG or PNG image.');
+  } finally {
+    input.value = '';
+  }
+}
+
+async function saveParcel(event) {
   event.preventDefault();
-  const form = new FormData(elements.parcelForm);
-  const parcel = {
-    id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    name: String(form.get('name') || '').trim(),
-    county: String(form.get('county') || '').trim(),
-    deedNumber: String(form.get('deedNumber') || '').trim(),
-    notes: String(form.get('notes') || '').trim(),
-    points: draftPoints.map(([latitude, longitude]) => [latitude, longitude]),
-    createdAt: new Date().toISOString()
-  };
-  if (!parcel.name || parcel.points.length < 3) return;
-  parcels.unshift(parcel);
-  if (!persistParcels()) {
-    parcels.shift();
+  if (savingParcel) return;
+  const files = Array.from(document.getElementById('parcelDocumentInput').files);
+  try {
+    validateDocuments(files);
+  } catch (error) {
+    showToast(error.message);
     return;
   }
-  renderParcels();
-  elements.parcelDialog.close();
-  elements.parcelForm.reset();
-  draftPoints = [];
-  draftLayer.clearLayers();
-  elements.mappingPanel.classList.add('hidden');
-  elements.mapHeading.textContent = 'Your land, at a glance.';
-  elements.mapSubheading.textContent = 'Your parcel is saved on this device.';
-  const layer = savedLayers.get(parcel.id);
-  if (layer) map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
-  showToast('Parcel saved on this device.');
+
+  savingParcel = true;
+  const submitButton = elements.parcelForm.querySelector('[type="submit"]');
+  submitButton.disabled = true;
+  const createdDocumentIds = [];
+  try {
+    const documents = await saveDocumentFiles(files, createdDocumentIds);
+    const form = new FormData(elements.parcelForm);
+    const parcel = {
+      id: createRecordId(),
+      name: String(form.get('name') || '').trim(),
+      county: String(form.get('county') || '').trim(),
+      deedNumber: String(form.get('deedNumber') || '').trim(),
+      deedPhoto: pendingDeedPhoto,
+      documents,
+      notes: String(form.get('notes') || '').trim(),
+      points: draftPoints.map(([latitude, longitude]) => [latitude, longitude]),
+      createdAt: new Date().toISOString()
+    };
+    if (!parcel.name || parcel.points.length < 3) {
+      await cleanupDocumentFiles(createdDocumentIds);
+      return;
+    }
+    parcels.unshift(parcel);
+    if (!persistParcels()) {
+      parcels.shift();
+      await cleanupDocumentFiles(createdDocumentIds);
+      return;
+    }
+    renderParcels();
+    elements.parcelDialog.close();
+    elements.parcelForm.reset();
+    pendingDeedPhoto = '';
+    showSelectedDocuments([]);
+    draftPoints = [];
+    draftLayer.clearLayers();
+    elements.mappingPanel.classList.add('hidden');
+    elements.mapHeading.textContent = 'Your land, at a glance.';
+    elements.mapSubheading.textContent = 'Your parcel is saved on this device.';
+    const layer = savedLayers.get(parcel.id);
+    if (layer) map.fitBounds(layer.getBounds(), { padding: [60, 60], maxZoom: 17 });
+    showToast('Parcel saved on this device.');
+  } catch (error) {
+    await cleanupDocumentFiles(createdDocumentIds);
+    console.error('Could not save parcel and attached documents.', error);
+    showToast(`Could not save parcel: ${error.message || 'Check available device storage.'}`);
+  } finally {
+    savingParcel = false;
+    submitButton.disabled = false;
+  }
 }
 
 function openParcelDetails(id) {
@@ -357,9 +811,73 @@ function openParcelDetails(id) {
   document.getElementById('detailsCounty').textContent = parcel.county || 'Not added';
   document.getElementById('detailsArea').textContent = parcelArea(parcel);
   document.getElementById('detailsDeed').textContent = parcel.deedNumber || 'Not added';
+  const photoPreview = document.getElementById('detailsDeedPhotoPreview');
+  const photoImage = document.getElementById('detailsDeedPhotoImage');
+  const photoEmpty = document.getElementById('detailsPhotoEmpty');
+  photoImage.src = parcel.deedPhoto || '';
+  photoPreview.classList.toggle('hidden', !parcel.deedPhoto);
+  photoEmpty.classList.toggle('hidden', Boolean(parcel.deedPhoto));
+  document.getElementById('detailsLastVisited').textContent = parcel.lastVisitedAt
+    ? formatVisit(parcel.lastVisitedAt)
+    : 'Not recorded yet';
   document.getElementById('detailsPoints').textContent = `${parcel.points.length} GPS points`;
   document.getElementById('detailsNotes').textContent = parcel.notes || 'No notes';
-  elements.detailsDialog.showModal();
+  renderDocumentList(parcel);
+  if (!elements.detailsDialog.open) elements.detailsDialog.showModal();
+}
+
+function selectParcelDocuments(event) {
+  const files = Array.from(event.currentTarget.files);
+  showSelectedDocuments(files);
+  try {
+    validateDocuments(files);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
+async function addParcelDocuments(event) {
+  const input = event.currentTarget;
+  const files = Array.from(input.files);
+  const parcelId = activeParcelId;
+  if (files.length === 0 || !parcelId) return;
+  const createdDocumentIds = [];
+  try {
+    validateDocuments(files);
+    const parcel = parcels.find((item) => item.id === parcelId);
+    if (!parcel) return;
+    const previousDocuments = Array.isArray(parcel.documents) ? parcel.documents : [];
+    const addedDocuments = await saveDocumentFiles(files, createdDocumentIds);
+    parcel.documents = previousDocuments.concat(addedDocuments);
+    if (!persistParcels()) {
+      parcel.documents = previousDocuments;
+      await cleanupDocumentFiles(createdDocumentIds);
+      return;
+    }
+    openParcelDetails(parcelId);
+    showToast(`${addedDocuments.length} document${addedDocuments.length === 1 ? '' : 's'} saved on this device.`);
+  } catch (error) {
+    await cleanupDocumentFiles(createdDocumentIds);
+    console.error('Could not attach documents to parcel.', error);
+    showToast(`Could not attach documents: ${error.message || 'Check available device storage.'}`);
+  } finally {
+    input.value = '';
+  }
+}
+
+function recordParcelVisit() {
+  const parcel = parcels.find((item) => item.id === activeParcelId);
+  if (!parcel) return;
+  const previousVisit = parcel.lastVisitedAt;
+  parcel.lastVisitedAt = new Date().toISOString();
+  if (!persistParcels()) {
+    if (previousVisit === undefined) delete parcel.lastVisitedAt;
+    else parcel.lastVisitedAt = previousVisit;
+    return;
+  }
+  renderParcels();
+  openParcelDetails(parcel.id);
+  showToast('Visit recorded on this device.');
 }
 
 function viewActiveParcel() {
@@ -370,7 +888,7 @@ function viewActiveParcel() {
   }
 }
 
-function deleteActiveParcel() {
+async function deleteActiveParcel() {
   const parcel = parcels.find((item) => item.id === activeParcelId);
   if (!parcel || !window.confirm(`Delete "${parcel.name}" from this device? This cannot be undone.`)) return;
   parcels = parcels.filter((item) => item.id !== activeParcelId);
@@ -378,9 +896,20 @@ function deleteActiveParcel() {
     parcels.unshift(parcel);
     return;
   }
+  let documentCleanupFailed = false;
+  for (const record of Array.isArray(parcel.documents) ? parcel.documents : []) {
+    try {
+      await deleteDocumentFile(record.id);
+    } catch (error) {
+      documentCleanupFailed = true;
+      console.error('Could not remove an attached document after parcel deletion.', error);
+    }
+  }
   renderParcels();
   elements.detailsDialog.close();
-  showToast('Parcel deleted from this device.');
+  showToast(documentCleanupFailed
+    ? 'Parcel deleted, but some attached documents could not be removed from device storage.'
+    : 'Parcel deleted from this device.');
 }
 
 function findLocation() {
@@ -419,11 +948,22 @@ document.getElementById('manualPoint').addEventListener('click', () => {
 });
 document.getElementById('locateMe').addEventListener('click', findLocation);
 document.getElementById('mapLocate').addEventListener('click', findLocation);
+document.getElementById('toggleMapLayer').addEventListener('click', toggleMapLayer);
+elements.locationSearchForm.addEventListener('submit', searchLocation);
+elements.locationSearchInput.addEventListener('input', hideSearchResults);
+elements.locationSearchInput.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') hideSearchResults();
+});
 document.getElementById('zoomIn').addEventListener('click', () => map && map.zoomIn());
 document.getElementById('zoomOut').addEventListener('click', () => map && map.zoomOut());
 document.getElementById('viewParcel').addEventListener('click', viewActiveParcel);
 document.getElementById('deleteParcel').addEventListener('click', deleteActiveParcel);
+document.getElementById('recordVisit').addEventListener('click', recordParcelVisit);
 elements.parcelForm.addEventListener('submit', saveParcel);
+document.getElementById('deedPhotoInput').addEventListener('change', chooseNewDeedPhoto);
+document.getElementById('detailsDeedPhotoInput').addEventListener('change', updateDeedPhoto);
+document.getElementById('parcelDocumentInput').addEventListener('change', selectParcelDocuments);
+document.getElementById('detailsDocumentInput').addEventListener('change', addParcelDocuments);
 document.getElementById('mobileMenu').addEventListener('click', () => elements.sidebar.classList.toggle('open'));
 document.addEventListener('click', (event) => {
   if (window.innerWidth <= 650 && elements.sidebar.classList.contains('open') &&

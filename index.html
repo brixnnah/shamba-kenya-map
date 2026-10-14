@@ -59,15 +59,27 @@
             <span class="eyebrow">PARCEL OVERVIEW</span>
             <h2 id="mapHeading">Your land, at a glance.</h2>
             <p id="mapSubheading">Map a boundary on the ground or explore your saved parcels.</p>
+            <form class="location-search" id="locationSearchForm" role="search">
+              <label class="visually-hidden" for="locationSearchInput">Search for a place or address</label>
+              <input id="locationSearchInput" type="search" maxlength="150" placeholder="Search a place or address" autocomplete="off" aria-controls="locationSearchResults" aria-expanded="false">
+              <button type="submit" aria-label="Search locations">⌕</button>
+            </form>
+            <div class="search-results hidden" id="locationSearchResults" role="listbox" aria-label="Location search results"></div>
+            <p class="search-credit">Search by OpenStreetMap</p>
           </div>
           <div class="map-card map-tools-card">
             <button class="map-tool" id="zoomIn" aria-label="Zoom in">＋</button>
             <button class="map-tool" id="zoomOut" aria-label="Zoom out">−</button>
             <span class="tool-divider"></span>
             <button class="map-tool locate-tool" id="mapLocate" aria-label="Center on my location" title="Center on my location">◎</button>
+            <span class="tool-divider"></span>
+            <button class="map-layer-toggle" id="toggleMapLayer" type="button" aria-label="Switch to satellite view" aria-pressed="false">Satellite</button>
           </div>
           <div class="map-legend"><span class="legend-swatch"></span> Your parcels <span class="legend-location"></span> Current location</div>
-          <div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors</div>
+          <div class="map-attribution">
+            <span id="roadAttribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors</span>
+            <span class="hidden" id="satelliteAttribution">Imagery © <a href="https://goto.arcgisonline.com/maps/World_Imagery" target="_blank" rel="noreferrer">Esri</a>, Vantor, Earthstar Geographics, and GIS User Community · Labels © Esri, HERE, Garmin, OpenStreetMap contributors, and GIS user community</span>
+          </div>
 
           <div class="mapping-panel hidden" id="mappingPanel" aria-live="polite">
             <div class="mapping-topline">
@@ -104,6 +116,22 @@
           <label>County<input name="county" maxlength="40" placeholder="e.g. Kiambu"></label>
           <label>Title deed number <span class="optional-label">OPTIONAL</span><input name="deedNumber" maxlength="80" placeholder="As shown on your deed"></label>
         </div>
+        <div class="photo-field">
+          <span class="field-label">Title deed photo <span class="optional-label">OPTIONAL</span></span>
+          <input class="visually-hidden" id="deedPhotoInput" type="file" accept="image/*" capture="environment">
+          <label class="photo-button secondary-button" for="deedPhotoInput">Take or choose a photo</label>
+          <p class="photo-help">A clear photo is compressed and saved only on this device.</p>
+          <div class="deed-photo-preview hidden" id="newDeedPhotoPreview">
+            <img id="newDeedPhotoImage" alt="Preview of the title deed photo">
+          </div>
+        </div>
+        <div class="attachment-field">
+          <span class="field-label">Documents <span class="optional-label">OPTIONAL</span></span>
+          <input class="visually-hidden" id="parcelDocumentInput" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.odt,.ods,.txt,.rtf,image/*">
+          <label class="photo-button secondary-button" for="parcelDocumentInput">Attach documents</label>
+          <p class="photo-help">PDF, Word, Excel, text, or image files up to 25 MB each. Stored only on this device.</p>
+          <ul class="selected-files hidden" id="newDocumentList"></ul>
+        </div>
         <label>Notes <span class="optional-label">OPTIONAL</span><textarea name="notes" rows="3" maxlength="500" placeholder="Any details you want to remember"></textarea></label>
         <div class="dialog-footer">
           <span class="local-save-note"><span aria-hidden="true">▣</span> Saved on this device</span>
@@ -121,11 +149,26 @@
         <div><span>COUNTY</span><strong id="detailsCounty">—</strong></div>
         <div><span>ESTIMATED AREA</span><strong id="detailsArea">—</strong></div>
         <div class="detail-wide"><span>TITLE DEED NUMBER</span><strong id="detailsDeed">Not added</strong></div>
+        <div class="detail-wide"><span>TITLE DEED PHOTO</span>
+          <div class="deed-photo-preview hidden" id="detailsDeedPhotoPreview">
+            <img id="detailsDeedPhotoImage" alt="Saved title deed photo">
+          </div>
+          <p class="photo-empty" id="detailsPhotoEmpty">No photo added</p>
+          <input class="visually-hidden" id="detailsDeedPhotoInput" type="file" accept="image/*" capture="environment">
+          <label class="photo-button secondary-button" for="detailsDeedPhotoInput">Take or replace photo</label>
+        </div>
+        <div class="detail-wide"><span>LAST VISITED</span><strong id="detailsLastVisited">Not recorded yet</strong></div>
+        <div class="detail-wide"><span>ATTACHED DOCUMENTS</span>
+          <ul class="attachment-list" id="detailsDocuments"></ul>
+          <input class="visually-hidden" id="detailsDocumentInput" type="file" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.odt,.ods,.txt,.rtf,image/*">
+          <label class="photo-button secondary-button" for="detailsDocumentInput">Add documents</label>
+          <p class="photo-help">PDF, Word, Excel, text, or image files up to 25 MB each.</p>
+        </div>
         <div class="detail-wide"><span>BOUNDARY POINTS</span><strong id="detailsPoints">—</strong></div>
         <div class="detail-wide"><span>NOTES</span><p id="detailsNotes">No notes</p></div>
       </div>
       <div class="details-disclaimer">This is a personal record, not proof of ownership or an official survey.</div>
-      <div class="details-actions"><button class="text-button delete-button" id="deleteParcel">Delete parcel</button><button class="primary-button" id="viewParcel">View on map</button></div>
+      <div class="details-actions"><button class="text-button delete-button" id="deleteParcel">Delete parcel</button><button class="secondary-button visit-button" id="recordVisit">I visited this plot</button><button class="primary-button" id="viewParcel">View on map</button></div>
     </dialog>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
