@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#123d35">
+    <meta name="description" content="Map and keep a local record of your land parcels in Kenya.">
+    <title>Shamba — Kenya land map</title>
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23123d35'/%3E%3Cpath d='M20 6C14 15 10 19 10 25a10 10 0 0 0 20 0c0-6-4-10-10-19Zm0 25a6 6 0 0 1-6-6c0-3 2-5 6-11 4 6 6 8 6 11a6 6 0 0 1-6 6Z' fill='%23b8df81'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://unpkg.com">
+    <link rel="preconnect" href="https://tile.openstreetmap.org">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar">
+        <a class="brand" href="#" aria-label="Shamba home">
+          <span class="brand-mark" aria-hidden="true">⌖</span>
+          <span class="brand-name">shamba<span class="brand-dot">.</span><small>LAND, MAPPED.</small></span>
+        </a>
+        <div class="sidebar-intro">
+          <span class="eyebrow">YOUR LAND, IN ONE PLACE</span>
+          <h1>Know what<br>you own.</h1>
+          <p>Map your parcels, keep deed details close, and take your records with you.</p>
+        </div>
+        <button class="primary-button add-parcel-button" id="startMapping">
+          <span aria-hidden="true">＋</span> Map a parcel
+        </button>
+        <div class="parcel-heading">
+          <h2>Your parcels</h2>
+          <span class="count-pill" id="parcelCount">0</span>
+        </div>
+        <div class="parcel-list" id="parcelList"></div>
+        <div class="sidebar-bottom">
+          <div class="privacy-note">
+            <span class="privacy-icon" aria-hidden="true">▣</span>
+            <div><strong>Your records stay on this device</strong><span>No government ownership verification.</span></div>
+          </div>
+          <span class="sidebar-version">SHAMBA MAPS <span>·</span> KENYA</span>
+        </div>
+      </aside>
+
+      <main class="main-panel">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobileMenu" aria-label="Open parcel list">☰</button>
+          <div class="location-label"><span class="location-pin">⌖</span><span>KENYA <span class="location-divider">/</span> <strong id="locationName">Nairobi County</strong></span></div>
+          <div class="topbar-actions">
+            <span class="connection-pill" id="connectionStatus"><span class="connection-dot"></span><span id="connectionText">Online</span></span>
+            <button class="icon-button" id="locateMe" aria-label="Find my location" title="Find my location">◎</button>
+          </div>
+        </header>
+
+        <section class="map-workspace" aria-label="Parcel map">
+          <div id="map" role="application" aria-label="Map of Kenya. Tap the map while mapping to add boundary points."></div>
+          <div class="map-wash" aria-hidden="true"></div>
+          <div class="map-card map-title-card">
+            <span class="eyebrow">PARCEL OVERVIEW</span>
+            <h2 id="mapHeading">Your land, at a glance.</h2>
+            <p id="mapSubheading">Map a boundary on the ground or explore your saved parcels.</p>
+          </div>
+          <div class="map-card map-tools-card">
+            <button class="map-tool" id="zoomIn" aria-label="Zoom in">＋</button>
+            <button class="map-tool" id="zoomOut" aria-label="Zoom out">−</button>
+            <span class="tool-divider"></span>
+            <button class="map-tool locate-tool" id="mapLocate" aria-label="Center on my location" title="Center on my location">◎</button>
+          </div>
+          <div class="map-legend"><span class="legend-swatch"></span> Your parcels <span class="legend-location"></span> Current location</div>
+          <div class="map-attribution">© <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">OpenStreetMap</a> contributors</div>
+
+          <div class="mapping-panel hidden" id="mappingPanel" aria-live="polite">
+            <div class="mapping-topline">
+              <div class="recording-state"><span class="recording-dot"></span><span id="recordingLabel">BOUNDARY RECORDING</span></div>
+              <button class="close-mapping" id="closeMapping" aria-label="Exit mapping">×</button>
+            </div>
+            <h2 id="mappingTitle">Walk the boundary</h2>
+            <p class="mapping-hint" id="mappingHint">Walk the edge of your land with GPS on. Your points save on this device.</p>
+            <div class="mapping-stats">
+              <div><strong id="pointCount">0</strong><span>POINTS</span></div>
+              <div><strong id="accuracy">—</strong><span>GPS ACCURACY</span></div>
+              <div><strong id="areaReadout">—</strong><span>EST. AREA</span></div>
+            </div>
+            <div class="mapping-actions">
+              <button class="secondary-button" id="undoPoint" disabled>Undo point</button>
+              <button class="primary-button" id="finishMapping" disabled>Save parcel →</button>
+            </div>
+            <button class="text-button" id="manualPoint">Tap map to add a point instead</button>
+          </div>
+          <div class="gps-toast hidden" id="gpsToast" role="status"></div>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="parcel-dialog" id="parcelDialog">
+      <form id="parcelForm">
+        <div class="dialog-header">
+          <div><span class="eyebrow">SAVE YOUR RECORD</span><h2>Name this parcel</h2></div>
+          <button class="close-dialog" type="button" id="cancelDialog" aria-label="Close">×</button>
+        </div>
+        <p class="dialog-copy">Details are saved privately on this device. They do not verify legal ownership.</p>
+        <label>Parcel name<input name="name" required maxlength="60" placeholder="e.g. Home farm"></label>
+        <div class="form-row">
+          <label>County<input name="county" maxlength="40" placeholder="e.g. Kiambu"></label>
+          <label>Title deed number <span class="optional-label">OPTIONAL</span><input name="deedNumber" maxlength="80" placeholder="As shown on your deed"></label>
+        </div>
+        <label>Notes <span class="optional-label">OPTIONAL</span><textarea name="notes" rows="3" maxlength="500" placeholder="Any details you want to remember"></textarea></label>
+        <div class="dialog-footer">
+          <span class="local-save-note"><span aria-hidden="true">▣</span> Saved on this device</span>
+          <button class="primary-button" type="submit">Save parcel</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="details-dialog" id="detailsDialog">
+      <div class="dialog-header">
+        <div><span class="eyebrow">PARCEL RECORD</span><h2 id="detailsName"></h2></div>
+        <button class="close-dialog" type="button" id="closeDetails" aria-label="Close">×</button>
+      </div>
+      <div class="details-grid">
+        <div><span>COUNTY</span><strong id="detailsCounty">—</strong></div>
+        <div><span>ESTIMATED AREA</span><strong id="detailsArea">—</strong></div>
+        <div class="detail-wide"><span>TITLE DEED NUMBER</span><strong id="detailsDeed">Not added</strong></div>
+        <div class="detail-wide"><span>BOUNDARY POINTS</span><strong id="detailsPoints">—</strong></div>
+        <div class="detail-wide"><span>NOTES</span><p id="detailsNotes">No notes</p></div>
+      </div>
+      <div class="details-disclaimer">This is a personal record, not proof of ownership or an official survey.</div>
+      <div class="details-actions"><button class="text-button delete-button" id="deleteParcel">Delete parcel</button><button class="primary-button" id="viewParcel">View on map</button></div>
+    </dialog>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="app.js"></script>
+  </body>
+</html>

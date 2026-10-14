@@ -1,0 +1,17 @@
+{
+  "name": "Shamba — Kenya land map",
+  "short_name": "Shamba",
+  "description": "Map and keep a local record of your land parcels in Kenya.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f7f3",
+  "theme_color": "#123d35",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='48' fill='%23123d35'/%3E%3Cpath d='M96 29C67 72 46 92 46 121a50 50 0 0 0 100 0c0-29-21-49-50-92Zm0 126a31 31 0 0 1-31-31c0-16 10-28 31-57 21 29 31 41 31 57a31 31 0 0 1-31 31Z' fill='%23b8df81'/%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
